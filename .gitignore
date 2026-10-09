@@ -1,4 +1,6 @@
 node_modules/
-.DS_Store
-coverage/
 dist/
+.env*
+.vercel/
+recover.py
+app-recovered.js

@@ -1,125 +1,69 @@
+import { applyEffect, dealDamage } from './effects.js';
 import { get } from '../content/registry.js';
 import { RULES } from './config.js';
 import { availableAbilities } from './build.js';
 import { calculateStats, passiveEffects } from './stats.js';
 import { requireGame } from './errors.js';
+import { nextRandom } from './rng.js';
+import { talentModifiers,activateTalents,consumeAttackBonuses,rememberAction } from './talents.js';
+import { activeBuild,baseBuild,maxStats,battleStats,initializeTactics,actionInput,choicesFor,specialBlocked,validateChoices,has,COMMON_ACTIONS } from './tactical.js';
+import { tacticalEffects } from './tactical-effects.js';
 
-export function beginCombat(players) {
-  requireGame(players.length === 2 && players.every(player => player.ready), 'Faltan jugadores preparados.');
-  return {
-    round: 1, selectionIndex: 0, handoff: false, pending: [null, null],
-    fighters: players.map(player => {
-      const stats = calculateStats(player.build);
-      return { playerId: player.id, hp: stats.hp, energy: stats.energy, statuses: [] };
-    }),
-    lastEvents: [], history: []
-  };
-}
-
-export function validateAction(players, combat, index, abilityId) {
-  requireGame(index === 0 || index === 1, 'Jugador inválido.');
-  requireGame(!combat.pending[index], 'Esta acción ya está confirmada.');
-  requireGame(combat.fighters[index].hp > 0, 'El personaje ya ha caído.');
-  requireGame(availableAbilities(players[index].build).includes(abilityId), 'Esa habilidad no pertenece a tu build.');
-  const ability = get('abilities', abilityId);
-  requireGame(combat.fighters[index].energy >= ability.cost, 'No tienes energía suficiente.');
-  return ability;
-}
-
-function addStatus(fighter, statusId, duration) {
-  const existing = fighter.statuses.find(status => status.id === statusId);
-  if (existing) existing.duration = Math.max(existing.duration, duration);
-  else fighter.statuses.push({ id: statusId, duration });
-}
-
-function applyEffect(effect, target, max, events, targetName) {
-  switch (effect.type) {
-    case 'status':
-      addStatus(target, effect.statusId, effect.duration);
-      events.push(`${targetName} recibe ${get('statuses', effect.statusId).name.toLowerCase()}.`);
-      break;
-    case 'heal': {
-      const gain = Math.min(effect.amount, max.hp - target.hp);
-      target.hp += gain;
-      if (gain) events.push(`${targetName} recupera ${gain} de vida.`);
-      break;
-    }
-    case 'energy': target.energy = Math.min(max.energy, target.energy + effect.amount); break;
-    case 'damage': target.hp = Math.max(0, target.hp - Math.max(0, effect.amount - max.resistance)); break;
-    default: throw new Error('Efecto no validado.');
-  }
-}
-
-export function resolveRound(players, current) {
-  requireGame(current.pending.length === 2 && current.pending.every(Boolean), 'Ambos jugadores deben confirmar su acción.');
-  // Never mutate the state supplied by the UI or the saved history.
-  const combat = structuredClone(current);
-  const events = [`RONDA ${combat.round}`];
-  const guarded = combat.pending.map(action => action.abilityId === 'guard');
-  const speeds = combat.fighters.map((fighter, index) => calculateStats(players[index].build, fighter.statuses).speed);
-  const order = speeds[0] === speeds[1] ? (combat.round % 2 ? [0, 1] : [1, 0]) : (speeds[0] > speeds[1] ? [0, 1] : [1, 0]);
-  for (const index of order) {
-    const actor = combat.fighters[index];
-    if (actor.hp <= 0) continue;
-    const enemyIndex = 1 - index;
-    const defender = combat.fighters[enemyIndex];
-    const ability = validateAction(players, { ...combat, pending: [null, null] }, index, combat.pending[index].abilityId);
-    actor.energy -= ability.cost;
-    events.push(`${players[index].name} usa ${ability.name}.`);
-    if (ability.kind === 'attack') {
-      const attack = calculateStats(players[index].build, actor.statuses).damage + ability.power;
-      const defense = calculateStats(players[enemyIndex].build, defender.statuses).defense;
-      const raw = Math.max(1, Math.floor(attack - defense * RULES.defenseFactor));
-      const dealt = Math.max(1, Math.floor(raw * (guarded[enemyIndex] ? RULES.guardMultiplier : 1)));
-      defender.hp = Math.max(0, defender.hp - dealt);
-      events.push(`${players[enemyIndex].name} pierde ${dealt} de vida${guarded[enemyIndex] ? ' (guardia)' : ''}.`);
-      if (defender.hp === 0) break;
-    }
-    const targetIndex = ability.target === 'self' ? index : enemyIndex;
-    const target = combat.fighters[targetIndex];
-    const max = calculateStats(players[targetIndex].build);
-    for (const effect of ability.effects) applyEffect(effect, target, max, events, players[targetIndex].name);
-  }
-  // Statuses tick once per completed round. A newly applied status counts this round.
-  for (let index = 0; index < 2; index++) {
-    const fighter = combat.fighters[index];
-    if (fighter.hp <= 0) continue;
-    const max = calculateStats(players[index].build);
-    for (const status of fighter.statuses) {
-      const tick = get('statuses', status.id).tick;
-      if (tick) {
-        const before = fighter.hp;
-        applyEffect(tick, fighter, max, events, players[index].name);
-        if (tick.type === 'damage') {
-          const damage = before - fighter.hp;
-          events.push(damage
-            ? `${players[index].name} sufre ${damage} por ${get('statuses', status.id).name.toLowerCase()}.`
-            : `${players[index].name} resiste ${get('statuses', status.id).name.toLowerCase()}.`);
-        }
-      }
-      status.duration--;
-    }
-    fighter.statuses = fighter.statuses.filter(status => status.duration > 0);
-    if (fighter.hp === 0) continue;
-    for (const passive of passiveEffects(players[index].build, 'roundEnd')) applyEffect(passive, fighter, max, events, players[index].name);
-    fighter.energy = Math.min(max.energy, fighter.energy + RULES.energyPerRound);
-  }
-  const alive = combat.fighters.map(fighter => fighter.hp > 0);
-  let winnerIndex = null;
-  let finished = !alive[0] || !alive[1] || combat.round >= RULES.maxRounds;
-  if (finished) {
-    if (alive[0] !== alive[1]) winnerIndex = alive[0] ? 0 : 1;
-    else if (alive[0] && alive[1]) {
-      const ratios = combat.fighters.map((fighter, i) => fighter.hp / calculateStats(players[i].build).hp);
-      if (ratios[0] !== ratios[1]) winnerIndex = ratios[0] > ratios[1] ? 0 : 1;
-    }
-    events.push(winnerIndex === null ? 'El duelo termina en empate.' : `${players[winnerIndex].name} gana el duelo.`);
-  }
-  combat.history.push({ round: combat.round, actions: current.pending.map(action => action.abilityId), events: [...events], fighters: structuredClone(combat.fighters) });
-  combat.lastEvents = events;
-  combat.pending = [null, null];
-  combat.selectionIndex = 0;
-  combat.handoff = false;
-  if (!finished) combat.round++;
-  return { combat, finished, winnerIndex };
-}
+export function beginCombat(players,seed=1){requireGame(players.length===2&&players.every(p=>p.ready),'Faltan jugadores preparados.');const c={round:1,rngSeed:seed>>>0,selectionIndex:0,handoff:false,pending:[null,null],fighters:players.map(p=>{const s=calculateStats(p.build);return{playerId:p.id,hp:s.hp,energy:s.energy,statuses:[],shield:0,cooldowns:{},uses:{}};}),lastEvents:[],history:[]};initializeTactics(players,c);return c;}
+function context(players,c,i,extra={}){return{build:activeBuild(players,c,i),actor:c.fighters[i],enemy:c.fighters[1-i],stats:maxStats(players,c,i),enemyStats:maxStats(players,c,1-i),ability:get('abilities',c.pending[i]?.abilityId),enemyAbility:get('abilities',c.pending[1-i]?.abilityId),round:c.round,...extra};}
+export function actionProfile(players,c,i,input){const choice=actionInput(input),source=get('abilities',choice.abilityId);if(!source)return {available:false,reason:'Técnica desconocida.'};const f=c.fighters[i],t=f.tactic??{},opts=choicesFor(players,c,i,source.id),target=choice.choices.target??opts[0]?.id;
+ let ability={...source};if(source.operation==='echo'){const old=get('abilities',c.fighters[1-i].talents?.previousAction);if(old)ability={...old,id:source.id,operation:'echo',once:true,echoId:old.id};}
+ if(source.operation==='mortgage'){const old=get('abilities',target);if(old)ability={...old,id:source.id,operation:'mortgage',cost:old.cost+2,mortgageId:old.id};}
+ if(source.operation==='testament'){const old=get('abilities',target);if(old)ability.cost=old.cost;}
+ if(source.operation==='mirror_return')ability.damageType=t.mirrorType??'magical';
+ const modifiers=talentModifiers('cost',context(players,c,i,{ability,enemyAbility:null}));const base=ability.energyCost==='all'?f.energy:ability.cost;
+ let cost=modifiers.freeCost?0:Math.max(0,Math.ceil((base+modifiers.costDelta)*Math.max(0,1+modifiers.costMultiplier)));if(t.dragonUntil>=c.round&&has(players,c,i,'dragon'))cost=0;
+ if(ability.energyCost==='all')cost=Math.min(base,cost);const freeDragon=t.dragonUntil>=c.round&&has(players,c,i,'dragon'),spendCost=ability.energyCost==='all'&&!freeDragon?base:cost,refund=ability.energyCost==='all'&&!freeDragon?base-cost:0;
+ const healthCost=(ability.healthCost??0)+modifiers.healthCost,allowed=availableAbilities(activeBuild(players,c,i)).includes(source.id);
+ let reason=!allowed?'Esa habilidad no pertenece a tu build.':specialBlocked(players,c,i,source,choice.choices);
+ if(t.eggUntil&&source.id==='guard')reason=null;
+ if(!reason&&(source.ultimate||source.consumable||source.once||source.operation==='echo')&&f.uses?.[source.id])reason='Ya gastaste esta técnica u objeto.';
+ if(!reason&&(f.cooldowns?.[source.id]??0)>0)reason='La habilidad está en recarga.';
+ if(!reason&&source.minRound&&c.round<source.minRound)reason='Disponible desde ronda '+source.minRound+'.';
+ if(!reason&&ability.tags?.includes('magic')&&f.statuses.some(s=>s.id==='silence'))reason='El silencio bloquea la magia.';
+ if(!reason&&(f.energy<cost||f.energy<(ability.minEnergy??0)))reason='No tienes energía suficiente.';
+ if(!reason&&f.hp<=healthCost)reason='Necesitas conservar al menos 1 de vida después del sacrificio.';
+ return{source,ability,cost,spendCost,refund,healthCost,choices:{...choice.choices,target},available:!reason,reason};}
+export function validateAction(players,c,i,input){requireGame(i===0||i===1,'Jugador inválido.');requireGame(!c.pending[i],'Esta acción ya está confirmada.');requireGame(c.fighters[i].hp>0,'El personaje ya ha caído.');const choice=actionInput(input);validateChoices(players,c,i,choice);const profile=actionProfile(players,c,i,choice);requireGame(profile.available,profile.reason);return profile.ability;}
+export function resolveRound(players,current){requireGame(current.pending.length===2&&current.pending.every(Boolean),'Ambos jugadores deben confirmar su acción.');for(let i=0;i<2;i++)validateAction(players,{...current,pending:[null,null]},i,current.pending[i]);const c=structuredClone(current);initializeTactics(players,c);const events=['RONDA '+c.round],acted=[false,false],outcomes=[null,null];
+ const random=()=>{const r=nextRandom(c.rngSeed);c.rngSeed=r.seed;return r.value;};let fx,depth=0;
+ const ctx=(i,extra={})=>context(players,c,i,{acted:acted[i],...extra});const trigger=(name,i,extra={})=>activateTalents(name,ctx(i,extra),events,players[i].name,players[1-i].name);
+ function damage(i,amount,meta={}){const f=c.fighters[i];if(f.hp<=0||!Number.isFinite(amount))return;let n=Math.max(0,Math.floor(amount));if(!meta.periodic)n=fx.receive(i,n,meta);const enemy=c.fighters[1-i];if(meta.direct&&enemy.tactic.delayVictory&&f.hp-n<=0){n=Math.max(0,f.hp-1);enemy.tactic.delayVictory=false;healRaw(1-i,12);energy(1-i,4);events.push(players[1-i].name+' aplaza su victoria y deja al rival con 1 vida.');}
+ const r=dealDamage(f,n);if(r.dealt)events.push(players[i].name+' pierde '+r.dealt+' de vida'+(meta.guarded?' (guardia)':'')+'.');trigger('healthChanged',i);if(f.hp===0&&depth<4){depth++;fx.fatal(i);depth--;}}
+ function healRaw(i,n){const f=c.fighters[i];if(f.hp<=0||f.tactic.eggUntil)return;const gain=Math.min(n,Math.max(0,maxStats(players,c,i).hp-f.hp));f.hp+=gain;if(gain)events.push(players[i].name+' recupera '+gain+' de vida.');}
+ function energy(i,n){const f=c.fighters[i];if(f.hp<=0)return;f.energy=Math.max(0,Math.min(maxStats(players,c,i).energy,f.energy+n));trigger('energyChanged',i);}
+ function status(i,e){const f=c.fighters[i];if(f.hp<=0)return;const entry=get('statuses',e.statusId),applications=f.talents.statusApplications[e.statusId]??0,m=talentModifiers('statusApplied',ctx(i,{status:entry,applications}));applyEffect({...e,duration:Math.max(1,e.duration-m.durationReduction)},f,maxStats(players,c,i),events,players[i].name);f.talents.statusApplications[e.statusId]=applications+1;}
+ function effect(e,i){if(e.type==='heal')fx.healShared(i,e.amount);else if(e.type==='energy'){energy(i,e.amount);if(c.field.chainUntil>=c.round)energy(1-i,Math.floor(e.amount/2));}else if(e.type==='damage')damage(i,Math.max(0,e.amount-maxStats(players,c,i).resistance),{periodic:true});else if(e.type==='status')status(i,e);else if(e.type==='shield'){let amount=e.amount;if(c.fighters[1-i].tactic.miracle&&has(players,c,1-i,'miracle')){const half=Math.floor(amount/2);c.fighters[1-i].shield=Math.min(maxStats(players,c,1-i).hp,c.fighters[1-i].shield+half);amount-=half;c.fighters[1-i].tactic.miracle=null;}applyEffect({...e,amount},c.fighters[i],maxStats(players,c,i),events,players[i].name);}else applyEffect(e,c.fighters[i],maxStats(players,c,i),events,players[i].name);}
+ fx=tacticalEffects({players,combat:c,events,damage,heal:healRaw,energy,status});for(const f of c.fighters){f.roundRecovery=0;f.recoveryPenalty=0;}fx.start();
+ let profiles=c.pending.map((x,i)=>actionProfile(players,c,i,x));let abilities=profiles.map(p=>p.ability);
+ for(let i=0;i<2;i++)if(profiles[i].source.operation==='futures'){const enemyAttack=abilities[1-i].kind==='attack',guard=(profiles[i].choices.target==='guard_on_attack')===enemyAttack;abilities[i]={...get('abilities',guard?'guard':'strike'),id:profiles[i].source.id,operation:'futures'};}
+ const guarded=abilities.map((a,i)=>a.kind==='guard'&&!c.fighters[i].statuses.some(s=>s.id==='stun')&&!c.fighters[i].tactic.eggUntil),speeds=c.fighters.map((f,i)=>battleStats(players,c,i).speed+(!c.field.chains&&abilities[i].tags?.includes('quick')?2:0));const order=speeds[0]===speeds[1]?(c.round%2?[0,1]:[1,0]):speeds[0]>speeds[1]?[0,1]:[1,0];const stunned=c.fighters.map(f=>f.statuses.some(s=>s.id==='stun'));
+ for(const i of order){const f=c.fighters[i],j=1-i,e=c.fighters[j];let lastWord=false;if(f.hp<=0){if(!acted[i]&&has(players,c,i,'lastWord')&&!f.uses.lastWord&&!f.tactic.eggUntil){f.uses.lastWord=1;lastWord=true;events.push(players[i].name+' ejecuta Última palabra.');}else continue;}
+ if(stunned[i]||f.tactic.eggUntil){events.push(players[i].name+' pierde su acción por '+(stunned[i]?'aturdimiento.':'incubación.'));continue;}
+ const profile=actionProfile(players,c,i,c.pending[i]);if(!profile.available&&!lastWord){events.push(players[i].name+' no puede ejecutar su técnica: '+profile.reason);continue;}const a=profiles[i].source.operation==='futures'?abilities[i]:profile.ability,choice=profile.choices.target;
+ if(f.energy<profile.cost||(profile.healthCost&&f.hp<=profile.healthCost))continue;f.energy-=profile.spendCost;if(profile.healthCost){f.hp-=profile.healthCost;trigger('healthChanged',i);}trigger('energyChanged',i);if(profile.source.cooldown)f.cooldowns[profile.source.id]=profile.source.cooldown+1;if(profile.source.ultimate||profile.source.consumable||profile.source.once||profile.source.operation==='echo')f.uses[profile.source.id]=1;
+ if(profile.source.operation==='mortgage')f.cooldowns[profile.ability.mortgageId]=(get('abilities',profile.ability.mortgageId).cooldown??1)+3;
+ acted[i]=true;outcomes[i]={abilityId:a.id,cost:profile.spendCost,hit:null,damage:0};events.push(players[i].name+' usa '+a.name+'.');trigger('acted',i,{ability:a});
+ if(a.kind==='attack'){
+ const m=talentModifiers('attack',ctx(i,{ability:a}));consumeAttackBonuses(m,f,events,players[i].name);const originalTalent=activeBuild(players,c,i).talentIds.some(id=>!get('talents',id).legacy);const baseAccuracy=originalTalent?(a.accuracy??1):1;let accuracy=Math.min(1,Math.max(0,baseAccuracy+m.accuracyBonus-(abilities[j].kind==='evade'&&!stunned[j]?RULES.evadeAccuracyPenalty:0)));if(a.unavoidable)accuracy=1;const hit=random()<accuracy;const critical=hit&&originalTalent&&random()<RULES.criticalChance;
+ Object.assign(outcomes[i],{hit,critical,accuracy});if(!hit){events.push(players[i].name+' falla el ataque.');trigger('missed',i,{ability:a});if(abilities[j].kind==='evade'){trigger('evaded',j);if(has(players,c,j,'crown'))e.tactic.crown.evade=true;}fx.afterAttack(i,a,false,guarded[j]);}
+ else{const b=fx.attackBonus(i,a);const type=a.damageType??'physical';let attack=battleStats(players,c,i)[type+'Damage']+(a.power??0)+b.power;let defense=battleStats(players,c,j)[type+'Defense'];const raw=Math.max(1,Math.floor(attack-defense*RULES.defenseFactor*(1-Math.min(1,(a.penetration??0)+m.defenseIgnore))));let bonus=1+m.damageBonus+b.bonus+(a.damagePerEnergy??0)*profile.spendCost;if(c.field.territoryUntil>=c.round&&f.tactic.territory){bonus+=f.tactic.territory*.15;f.tactic.territory=0;}const dealt=Math.max(1,Math.floor(raw*bonus*(critical?RULES.criticalMultiplier:1)*(guarded[j]&&!b.ignoreGuard?RULES.guardMultiplier:1)));damage(j,dealt,{abilityId:a.echoId??a.id,damageType:a.damageType,direct:true,guarded:guarded[j]});outcomes[i].damage=dealt;
+ trigger('damaged',j,{ability:a,damageType:a.damageType,critical});if(guarded[j])trigger('guardedHit',j,{enemyAbility:a});trigger('hit',i,{ability:a});
+ if(e.hp>0)for(const passive of passiveEffects(activeBuild(players,c,i),'onHit',a))effect(passive,j);if(a.id==='shatter'){e.tactic.throneUntil=0;e.tactic.cannon=null;}fx.afterAttack(i,a,true,guarded[j]);}
+ }
+ if(a.kind!=='attack'||outcomes[i].hit){fx.act(i,a,choice);if(e.hp>0||a.target==='self')for(const ef of a.effects??[])effect(ef,ef.target==='self'?i:a.target==='self'?i:j);}
+ if(has(players,c,i,'fourth')&&!a.operation&&!f.tactic.records.includes(a.id))f.tactic.records=[...f.tactic.records,a.id].slice(-3);
+ if(c.field.territoryUntil>=c.round&&a.kind==='guard')f.tactic.territory=Math.min(3,(f.tactic.territory??0)+1);
+ rememberAction(f,a);if(profile.refund){energy(i,profile.refund);events.push(players[i].name+' recupera '+profile.refund+' de energía por su descuento.');}if(lastWord)f.hp=0;
+ }
+ // Tick existing statuses once; newly applied statuses count this round.
+ for(let i=0;i<2;i++){const f=c.fighters[i];if(f.hp>0&&!f.tactic.eggUntil){for(const s of f.statuses){const entry=get('statuses',s.id);if(entry.tick&&f.hp>0){if(entry.tick.type==='damage'){const m=talentModifiers('statusTick',ctx(i,{status:entry})),before=f.hp;damage(i,Math.floor(Math.max(0,entry.tick.amount-maxStats(players,c,i).resistance)*Math.max(0,1+m.tickMultiplier)),{periodic:true});const lost=before-f.hp;events.push(players[i].name+(lost?' sufre '+lost+' por ':' resiste ')+entry.name.toLowerCase()+'.');}else effect(entry.tick,i);}s.duration--;}f.statuses=f.statuses.filter(s=>s.duration>0);if(f.hp>0){for(const passive of passiveEffects(activeBuild(players,c,i),'roundEnd'))effect(passive,i);energy(i,Math.max(0,RULES.energyPerRound+f.roundRecovery-f.recoveryPenalty)+(has(players,c,i,'crown')&&f.tactic.crown.technique?1:0));trigger('roundEnd',i);}}
+ for(const key of Object.keys(f.cooldowns))f.cooldowns[key]=Math.max(0,f.cooldowns[key]-1);for(const[type,bonus]of Object.entries(f.talents.adaptations))if(bonus.expiresRound<=c.round)delete f.talents.adaptations[type];delete f.roundRecovery;delete f.recoveryPenalty;
+ }
+ fx.end();const alive=c.fighters.map(f=>f.hp>0);const finished=!alive[0]||!alive[1]||c.round>=RULES.maxRounds;let winnerIndex=null;if(finished){if(alive[0]!==alive[1])winnerIndex=alive[0]?0:1;else if(alive[0]&&alive[1]){const ratios=c.fighters.map((f,i)=>f.hp/maxStats(players,c,i).hp);if(ratios[0]!==ratios[1])winnerIndex=ratios[0]>ratios[1]?0:1;}events.push(winnerIndex===null?'El duelo termina en empate.':players[winnerIndex].name+' gana el duelo.');}
+ c.history.push({round:c.round,actions:current.pending.map(a=>a.abilityId),events:[...events],fighters:structuredClone(c.fighters),outcomes});c.lastEvents=events;c.lastOutcomes=outcomes;c.pending=[null,null];c.selectionIndex=0;c.handoff=false;if(!finished)c.round++;for(let i=0;i<2;i++){c.fighters[i].energy=Math.min(c.fighters[i].energy,maxStats(players,c,i).energy);}return{combat:c,finished,winnerIndex};}

@@ -1157,3 +1157,17 @@ small {
     padding:13px 11px
   }
 }
+
+.generic-portrait{position:relative;width:180px;height:225px;object-fit:contain;border-radius:24px;z-index:1;filter:drop-shadow(0 10px 22px #0008)}
+.phase-chips{display:flex;flex-wrap:wrap;gap:6px;margin:18px 0}.phase-chips .chip{font-size:11px;padding:7px 10px}.phase-catalog{max-height:510px;overflow:auto;padding:3px}.tier{font-size:10px;color:#cfa76c}.blocked{color:#c48686}.inventory-list{margin-top:16px}code{overflow-wrap:anywhere}.abilities{max-height:460px;overflow:auto}.start-card form h3{margin-bottom:15px}
+@media(max-width:600px){.generic-portrait{width:120px;height:150px}.arena-fighters .avatar-shell{width:130px}.phase-catalog{max-height:none}.start-card .result-actions{flex-direction:column}.abilities{max-height:none}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+
+#app[aria-busy="true"] .roll-area .primary{animation:roulette-pulse .25s ease-in-out infinite alternate}@keyframes roulette-pulse{to{filter:brightness(1.5);transform:translateY(-2px)}}
+
+/* Layered vector characters: independent race, class, armor and weapon. */
+.layered-character .avatar-halo{display:none}.character-art{position:relative;z-index:2;width:270px;height:330px;max-width:none;overflow:visible;filter:drop-shadow(0 9px 10px #070b1570)}
+.visual-scene .layered-character{width:290px;height:345px}.visual-scene .character-art{width:282px;height:345px}
+.combatant .character-art{width:215px;height:263px}.result-fighter .character-art{width:180px;height:220px}.result-fighter .avatar-shell{width:180px;height:220px}
+@media(max-width:600px){.visual-scene{height:330px}.visual-scene .character-art{width:260px;height:318px}.combatant .character-art{width:156px;height:191px}.arena-fighters .layered-character{width:145px;height:205px}.result-fighter .character-art{width:155px;height:190px}.result-fighter .avatar-shell{width:155px;height:190px}}
+.catalog-tools,.talent-config,.combat-decisions{display:flex;flex-wrap:wrap;gap:12px;margin:18px 0}.catalog-tools label,.talent-config label,.combat-decisions label{display:grid;gap:7px;flex:1;min-width:180px;color:var(--muted);font-size:12px}.catalog-tools input,.catalog-tools select,.talent-config select,.combat-decisions select{width:100%;padding:12px;border:1px solid #51464d;background:#17131c;color:#f0e5d1;border-radius:6px}.tier[data-tier="Inusual"]{color:#89cfa1}.tier[data-tier="Raro"]{color:#89baff}.tier[data-tier="Épico"]{color:#cd96ef}.tier[data-tier="Legendario"]{color:#f5c46a}.sample-tag{color:#c5b695!important}.talent-state{border:1px solid #65513e;color:#ebc88b!important}.phase-catalog{align-content:start}.combat-decisions{padding:12px;border:1px solid #65513e;border-radius:8px}

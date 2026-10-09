@@ -27,6 +27,7 @@ export function validateBuild(build) {
     if (requirements?.classId) requireGame(requirements.classId === build.classId, 'Tu clase no puede equipar ese objeto.');
     if (requirements?.raceId) requireGame(requirements.raceId === build.raceId, 'Tu raza no puede equipar ese objeto.');
   }
+  if(build.talentConfig){const c=build.talentConfig;requireGame(typeof c==='object'&&!Array.isArray(c)&&Object.keys(c).every(k=>['oath','secondaryWeapon','secondClass'].includes(k)),'Configuración de talentos inválida.');if(c.oath)requireGame(['strike','guard','evade','potion','ether'].includes(c.oath),'Juramento inválido.');if(c.secondaryWeapon)requireGame(get('items',c.secondaryWeapon)?.slot==='weapon','Arma secundaria inválida.');if(c.secondClass)requireGame(get('classes',c.secondClass),'Segunda clase inválida.');}
   const look = build.appearance;
   requireGame(look && ['warm', 'light', 'deep'].includes(look.skin) && ['dark', 'silver', 'flame'].includes(look.hair) && ['short', 'long'].includes(look.style) && ['none', 'red', 'blue'].includes(look.cape), 'La apariencia no es válida.');
   return true;
@@ -52,6 +53,7 @@ export function changeBuild(build, change) {
       requireGame(RULES.slots.includes(change.slot), 'Ese espacio de equipo no existe.');
       next.equipment[change.slot] = change.id;
       break;
+    case 'talent-config': next.talentConfig={...(next.talentConfig??{}),[change.key]:change.id}; break;
     case 'appearance':
       requireGame(Object.hasOwn(DEFAULT_APPEARANCE, change.key), 'Esa opción visual no existe.');
       next.appearance[change.key] = change.value;
@@ -78,5 +80,5 @@ export function rollBuild(build, initialSeed) {
 
 export function availableAbilities(build) {
   validateBuild(build);
-  return ['strike', 'guard', ...get('classes', build.classId).abilities, ...get('gifts', build.giftId).abilities];
+  return [...new Set(['strike', 'guard', 'evade', 'potion', 'ether', 'interfere', 'take_cover', ...get('classes', build.classId).abilities, get('classes', build.classId).ultimate, ...get('gifts', build.giftId).abilities, ...build.talentIds.flatMap(id=>get('talents',id).abilities??[]), ...Object.values(build.equipment).flatMap(id => get('items', id)?.abilities ?? [])].filter(Boolean))];
 }

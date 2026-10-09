@@ -16,7 +16,7 @@ export function calculateStats(build, statuses = []) {
   return stats;
 }
 
-export function passiveEffects(build, trigger) {
+export function passiveEffects(build, trigger, ability = null) {
   const sources = [get('gifts', build.giftId), ...build.talentIds.map(id => get('talents', id)), ...RULES.slots.map(slot => get('items', build.equipment[slot]))];
-  return sources.flatMap(source => (source?.passives ?? []).filter(passive => passive.trigger === trigger));
+  return sources.flatMap(source => (source?.passives ?? []).filter(passive => passive.trigger === trigger && (!passive.abilityTag || ability?.tags?.includes(passive.abilityTag))));
 }

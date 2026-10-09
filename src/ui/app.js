@@ -1,174 +1,114 @@
-import { content, get, options } from '../content/registry.js';
+import { composeCharacter } from './character-composer.js';
+import { content, get } from '../content/registry.js';
 import { validateContent } from '../engine/content-validation.js';
-import { RULES } from '../engine/config.js';
-import { availableAbilities } from '../engine/build.js';
+import { RULES, GAME_VERSION } from '../engine/config.js';
+import { createBuild, changeBuild, availableAbilities } from '../engine/build.js';
 import { calculateStats } from '../engine/stats.js';
-import { createGame, updatePlayerBuild, rollPlayerBuild, confirmPlayer, continuePreparation, submitAction, continueCombat, rematch } from '../engine/game-state.js';
+import { TALENT_TIERS } from '../content/talents.js';
+import { activeBuild,baseBuild,maxStats,battleStats,has,choicesFor,predictionOptions,publicTalentState,COMMON_ACTIONS } from '../engine/tactical.js';
+import { validateAction,actionProfile } from '../engine/combat.js';
+import { createGame, confirmPlayer, continuePreparation, submitAction, continueCombat, rematch } from '../engine/game-state.js';
+import { PREPARATION_PHASES, initializePreparation, phaseOptions, choosePhase, drawPhase, advancePhase } from '../engine/preparation.js';
 import { loadGame, saveGame, clearGame } from '../engine/storage.js';
-import { composeSprite } from './sprite-composer.js';
 
-const root = document.querySelector('#app');
-const validationErrors = validateContent();
-const loaded = loadGame();
-let game = loaded.state;
-let error = validationErrors.length ? 'El contenido del juego contiene errores. Revisa la consola de desarrollo.' : loaded.error;
-let warning = '';
-let tab = 'origin';
-let selectedAbility = null;
-let debugOpen = false;
-if (validationErrors.length) console.error('Carnalia content validation:', validationErrors);
-
-const h = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
-const label = { hp: 'Vida', damage: 'Daño', defense: 'Defensa', speed: 'Velocidad', energy: 'Energía', resistance: 'Resistencia' };
-const slotName = { weapon: 'Arma', armor: 'Armadura', accessory: 'Accesorio', relic: 'Reliquia' };
-const emoji = { hp: '♥', damage: '◆', defense: '▣', speed: '➤', energy: '✦', resistance: '◈' };
-
-function statGrid(build) {
-  const stats = calculateStats(build);
-  return `<div class="stat-grid">${RULES.statKeys.map(key => `<div class="stat"><span>${emoji[key]} ${label[key]}</span><strong>${stats[key]}</strong></div>`).join('')}</div>`;
+const root=document.querySelector('#app');
+const loaded=loadGame();let game=loaded.state, error=loaded.error, session=null, joined=true, selected=null, busy=false;
+let lastRevision=-1, networkWarning='',talentTier='',talentSearch='',decisions={};
+try{session=JSON.parse(sessionStorage.getItem('carnalia-room')??'null');}catch{}
+if(session)game=null;
+if(game&&!game.preparation.steps)game=null;
+const h=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const labels={hp:'Vida',damage:'Daño',defense:'Defensa',speed:'Velocidad',energy:'Energía',resistance:'Resistencia'};
+const slots={weapon:'Arma',armor:'Armadura',accessory:'Accesorio',relic:'Reliquia'};
+const index=()=>session?session.index:(game?.phase==='preparation'?game.preparation.index:game?.combat?.selectionIndex??0);
+const stats=b=>`<div class="stat-grid">${Object.entries(calculateStats(b)).map(([k,v])=>`<div class="stat"><span>${labels[k]}</span><strong>${v}</strong></div>`).join('')}</div>`;
+const portrait=(i)=>`<div class="avatar-shell layered-character"><div class="avatar-halo"></div>${composeCharacter(game.combat?baseBuild(game.players,game.combat,i):game.players[i].build,{id:`player-${i}`,name:game.players[i].name})}<div class="avatar-ground"></div></div>`;
+const mods=e=>Object.entries(e.stats??{}).map(([k,v])=>`${v>0?'+':''}${v} ${labels[k]}`).join(' · ');
+function inventory(b){return `<div class="inventory-list"><span><b>Raza</b>${h(get('races',b.raceId).name)}</span><span><b>Clase</b>${h(get('classes',b.classId).name)}</span><span><b>Don</b>${h(get('gifts',b.giftId).name)}</span><span><b>Talentos</b>${b.talentIds.map(id=>h(get('talents',id).name)).join(' · ')||'—'}</span>${RULES.slots.map(s=>`<span><b>${slots[s]}</b>${h(get('items',b.equipment[s])?.name??'Ninguno')}</span>`).join('')}</div>`;}
+function shell(body,step=0){return `<div class="app-shell"><header class="topbar"><div class="brand"><span class="brand-symbol">✧</span><span>CARNALIA</span><small>BETA DE PRUEBAS</small></div><div class="top-right"><span class="edition">v${GAME_VERSION}</span>${game||session?'<button class="quiet-link" data-action="leave">Salir</button>':''}</div></header>${step?`<div class="phase-line"><span class="${step===1?'active':''}">01 / PREPARAR</span><span class="${step===2?'active':''}">02 / COMBATIR</span><span class="${step===3?'active':''}">03 / RESULTADO</span></div>`:''}${error?`<div class="alert" role="alert">${h(error)}</div>`:''}${networkWarning?`<div class="notice" role="status">${h(networkWarning)}</div>`:''}${body}<footer class="footer">DOS VOLUNTADES · UNA ARENA · ${session?'SALA '+h(session.code):'DUELO LOCAL'} · CONTENIDO PROVISIONAL</footer></div>`;}
+function landing(){return shell(`<main class="landing"><div class="landing-copy"><span class="eyebrow">EL UMBRAL ESTÁ ABIERTO</span><h1>Forja tu<br><em>destino.</em></h1><p>Ocho decisiones construyen tu combatiente. Elige tu camino o confía en tres resultados del azar. Después, enfrenta tu build a la de tu rival.</p><div class="feature-line"><span>20 RAZAS</span><span>30 CLASES</span><span>20 DONES</span><span>102 TALENTOS</span></div><p>Sin monstruos. Sin progresión permanente. 102 talentos: catálogo original y talentos de la beta. Cinco rarezas, de Común a Legendario.</p></div><div class="start-card"><form id="new-game"><span class="card-kicker">CREAR PARTIDA</span><h2>Entra en Carnalia</h2><label>TU NOMBRE<input name="player1" minlength="2" maxlength="18" placeholder="Combatiente" required autocomplete="off"></label><label>NOMBRE DEL RIVAL (LOCAL)<input name="player2" minlength="2" maxlength="18" placeholder="Rival" value="Rival" autocomplete="off"></label><fieldset><legend>MODO</legend><label class="mode-choice"><input type="radio" name="mode" value="selection" checked><span><b>Selección</b><small>Todo el catálogo en cada fase.</small></span></label><label class="mode-choice"><input type="radio" name="mode" value="chance"><span><b>Azar</b><small>Elige uno de tres resultados por fase.</small></span></label></fieldset><div class="result-actions"><button class="primary" name="transport" value="local" type="submit">DUELO LOCAL →</button><button class="secondary" name="transport" value="online" type="submit">CREAR SALA</button></div></form><div class="divider"></div><form id="join-game"><h3>Entrar a una sala</h3><label>NOMBRE<input name="name" required minlength="2" maxlength="18"></label><label>CÓDIGO<input name="code" required maxlength="6" placeholder="A1B2C3" value="${h(new URLSearchParams(location.search).get('room')??'')}"></label><button class="secondary full">ENTRAR →</button></form><p class="helper">Prueba online: crea una sala y comparte el código. Cada jugador usa su propio dispositivo.</p></div></main>`);}
+function waiting(title,text,action=''){return shell(`<main class="handoff"><div class="seal">✧</div><h1>${title}</h1><p>${text}</p>${action}</main>`,game?.phase==='combat'?2:1);}
+function preparation(){
+ const i=index(),p=game.players[i],b=p.build,step=game.preparation.steps[i],phase=PREPARATION_PHASES[step];
+ if(session&&!joined)return waiting('Tu sala está lista',`Comparte el código <strong>${h(session.code)}</strong>. El rival entra desde esta dirección y pulsa Entrar a una sala.<br><code>${h(location.origin+'/?room='+session.code)}</code>`);
+ if(!session&&game.preparation.handoff)return waiting('Turno de '+h(game.players[1].name),'Entrega el dispositivo al segundo jugador.','<button class="primary" data-action="continue-prep">CONTINUAR →</button>');
+ if(p.ready)return waiting('Build confirmada','Esperando a que el rival termine su preparación.');
+ let editor;
+ if(step===8){editor=`<span class="eyebrow">OCHO FASES COMPLETADAS</span><h2>Revisa tu build</h2>${inventory(b)}${talentConfiguration(b)}<h3>Técnicas disponibles</h3><div class="chips">${availableAbilities(b).map(id=>`<span class="chip" title="${h(get('abilities',id).description)}">${h(get('abilities',id).name)}</span>`).join('')}</div><p>Ultimate desde ronda 3, una vez por duelo. Poción y éter tienen una carga cada uno. El equipo modifica estadísticas, técnicas y apariencia.</p><div class="result-actions"><button class="secondary" data-action="restart">REHACER BUILD</button><button class="primary" data-action="ready">CONFIRMAR BUILD →</button></div>`;}
+ else{
+ const offers=game.preparation.offers[i];let entries=phaseOptions(game,i);
+ const chosenId=game.preparation.completed[i][step];
+ if(chosenId&&!entries.some(e=>e.id===chosenId))entries.unshift(get(phase.kind,chosenId));
+ if(game.mode==='chance')entries=offers?entries.filter(e=>offers.includes(e.id)):[];
+ else if(phase.kind==='talents')entries=entries.filter(e=>(!talentTier||e.tier===talentTier)&&(!talentSearch||(e.name+' '+e.description).toLocaleLowerCase('es').includes(talentSearch.toLocaleLowerCase('es'))));
+ editor=`<span class="eyebrow">FASE ${step+1} DE 8 · ${game.mode==='chance'?'AZAR':'SELECCIÓN'}</span><h2>${phase.name}</h2><nav class="phase-chips" aria-label="Fases">${PREPARATION_PHASES.map((s,k)=>`<span class="chip ${k===step?'chosen':''}">${k<step?'✓ ':''}${s.name}</span>`).join('')}</nav>${phase.kind==='talents'?`<p>Dos talentos distintos. Las cantidades son balance inicial de prueba.</p>${game.mode==='selection'?`<div class="catalog-tools"><label>Rareza<select id="talent-tier"><option value="">Todas</option>${TALENT_TIERS.map(t=>`<option ${talentTier===t?'selected':''}>${h(t)}</option>`).join('')}</select></label><label>Buscar talento<input id="talent-search" value="${h(talentSearch)}" placeholder="Nombre o efecto; Enter para buscar"></label></div>`:''}`:''}${game.mode==='chance'&&!offers?'<div class="roll-area"><p>Tres resultados distintos. Una elección para esta fase.</p><button class="primary" data-action="draw">✦ GIRAR RULETA</button></div>':''}<div class="choices phase-catalog">${entries.map(e=>`<button class="choice ${chosenId===e.id?'chosen':''}" data-action="choose" data-id="${e.id}" aria-pressed="${chosenId===e.id}"><span class="choice-title">${h(e.name)}</span>${e.tier?`<span class="tier" data-tier="${h(e.tier)}">${h(e.tier)}</span>`:''}<small>${h(e.description)}</small>${e.sample?'<small class="sample-tag">Espécimen de prueba · adaptación de aventura</small>':''}<span class="choice-stats">${h(mods(e))}</span>${e.abilities?`<small>${e.abilities.map(id=>h(get('abilities',id).name)).join(' · ')}</small>`:''}</button>`).join('')}</div><div class="editor-footer"><span>${chosenId?'Elegido: '+h(get(phase.kind,chosenId).name):'Elige una opción para continuar.'}</span><button class="primary" data-action="advance" ${!game.preparation.selected[i]?'disabled':''}>SIGUIENTE FASE →</button></div>`;
+ }
+ return shell(`<main class="preparation"><div class="section-heading"><div><span class="eyebrow">PREPARACIÓN</span><h1>${h(p.name)}, <em>forja tu héroe.</em></h1></div><span class="counter">JUGADOR ${i+1} / 2</span></div><div class="prep-grid"><aside class="character-panel"><div class="visual-scene">${portrait(i)}<span class="scene-caption">RAZA · CLASE · EQUIPO</span></div><div class="character-details"><h2>${h(p.name)}</h2>${stats(b)}${inventory(b)}</div></aside><section class="editor-panel">${editor}</section></div></main>`,1);
 }
-function avatar(index, className = '') {
-  return `<div class="avatar-shell ${className}"><div class="avatar-halo"></div><canvas class="sprite" data-sprite-player="${index}" width="48" height="64" role="img" aria-label="Personaje de ${h(game.players[index].name)}"></canvas><div class="avatar-ground"></div></div>`;
+function fighter(i){const p=game.players[i],f=game.combat.fighters[i],s=maxStats(game.players,game.combat,i);return `<div class="fighter-card"><div class="fighter-name"><span>JUGADOR ${i+1}</span><strong>${h(p.name)}</strong></div><div class="meter-label"><span>VIDA · ESCUDO ${f.shield??0}</span><b>${f.hp}/${s.hp}</b></div><div class="meter"><i style="width:${f.hp/s.hp*100}%"></i></div><div class="meter-label"><span>ENERGÍA</span><b>${f.energy}/${s.energy}</b></div><div class="meter energy"><i style="width:${f.energy/s.energy*100}%"></i></div><div class="status-list">${publicTalentState(game.players,game.combat,i).map(text=>`<span class="talent-state">${h(text)}</span>`).join('')}${f.statuses.map(x=>`<span title="${h(get('statuses',x.id).description)}">${h(get('statuses',x.id).name)} · ${x.duration}</span>`).join('')||'<span class="neutral">Sin estados</span>'}</div></div>`;}
+function blocked(i,id){try{validateAction(game.players,game.combat,i,{abilityId:id,choices:selected===id?decisions:{}});return '';}catch(e){return e.message;}}
+function combat(){
+ const c=game.combat,i=index(),p=game.players[i];
+ if(!session&&c.handoff)return waiting('Decide '+h(game.players[1].name),'La primera acción ya está oculta. Entrega el dispositivo.','<button class="primary" data-action="continue-combat">CONTINUAR →</button>');
+ const committed=Boolean(c.pending[i]);const ids=availableAbilities(activeBuild(game.players,c,i));
+ return shell(`<main class="combat"><div class="section-heading"><div><span class="eyebrow">ARENA · RONDA ${c.round}</span><h1>Dos voluntades.<br><em>Una decisión.</em></h1></div><span class="counter">${h(p.name)}</span></div><div class="arena"><div class="arena-sky"><span class="arena-moon"></span></div><div class="arena-fighters"><div class="combatant">${portrait(0)}<span>${h(game.players[0].name)}</span></div><div class="arena-center">✧<small>VS</small></div><div class="combatant">${portrait(1)}<span>${h(game.players[1].name)}</span></div></div><div class="arena-floor"></div></div><div class="fighter-grid">${fighter(0)}${fighter(1)}</div><div class="combat-bottom"><section class="action-panel"><span class="eyebrow">ACCIÓN OCULTA HASTA AMBAS CONFIRMACIONES</span><h2>${committed?'Esperando la acción rival':h(p.name)+', elige tu movimiento'}</h2>${committed?'<p>Tu acción está confirmada y permanece oculta al rival.</p>':`<div class="abilities">${ids.map(id=>{const a=get('abilities',id),why=blocked(i,id),profile=actionProfile(game.players,c,i,{abilityId:id,choices:selected===id?decisions:{}});return `<button class="ability ${selected===id?'chosen':''}" data-action="ability" data-id="${id}" ${why?'disabled':''} title="${h(why||a.description)}"><span><b>${h(a.name)}</b><em>${profile.cost} ✦${profile.healthCost?` · ${profile.healthCost} ♥`:""}</em></span><small>${h(a.description)}</small>${why?`<small class="blocked">${h(why)}</small>`:''}</button>`;}).join('')}</div>${combatDecisions(i)}<div class="action-footer"><span>Velocidad decide el orden. Empates alternan. Los estados cuentan la ronda en que se aplican.</span><button class="primary" data-action="action" ${!selected||blocked(i,selected)?'disabled':''}>CONFIRMAR ACCIÓN →</button></div>`}</section><aside class="battle-log"><span class="eyebrow">CRÓNICA</span><h3>Última ronda</h3><ol>${c.lastEvents.map(e=>`<li>${h(e)}</li>`).join('')||'<li>La arena espera.</li>'}</ol><details><summary>Build rival</summary>${inventory(game.players[1-i].build)}</details></aside></div></main>`,2);
 }
-function chosenName(kind, id) { return get(kind, id)?.name ?? 'Ninguno'; }
-function buildInventory(build) {
-  return `<div class="inventory-list">
-    <span><b>Origen</b>${h(chosenName('races', build.raceId))}</span>
-    <span><b>Clase</b>${h(chosenName('classes', build.classId))}</span>
-    <span><b>Don</b>${h(chosenName('gifts', build.giftId))}</span>
-    <span><b>Talentos</b>${build.talentIds.map(id => h(chosenName('talents', id))).join(' · ') || '—'}</span>
-    ${RULES.slots.map(slot => `<span><b>${slotName[slot]}</b>${h(chosenName('items', build.equipment[slot]))}</span>`).join('')}
-  </div>`;
+function result(){const winner=game.players.find(p=>p.id===game.result.winnerId);return shell(`<main class="result"><span class="eyebrow">${game.result.rounds} RONDAS</span><div class="result-emblem">✧</div><h1>${winner?h(winner.name)+'<br><em>conquista la arena.</em>':'<em>Empate.</em>'}</h1><div class="result-fighters">${game.players.map((p,i)=>`<div class="result-fighter">${portrait(i)}<b>${h(p.name)}</b>${stats(p.build)}</div>`).join('')}</div><button class="primary" data-action="rematch">OTRA PARTIDA →</button><details class="chronicle"><summary>Crónica completa</summary>${game.combat.history.map(r=>`<div><h3>Ronda ${r.round}</h3>${r.events.map(e=>`<p>${h(e)}</p>`).join('')}</div>`).join('')}</details></main>`,3);}
+let renderedPhaseKey=null;
+function render(){const phaseKey=game?.phase==='preparation'?game.phase+':'+index()+':'+game.preparation.steps[index()]:game?.phase??'landing';const preserve=phaseKey===renderedPhaseKey;const pane=root.querySelector('.phase-catalog'),scrollTop=pane?.scrollTop??0,pageTop=window.scrollY;root.innerHTML=validateContent().length?shell('<main class="fatal">El catálogo contiene errores. Ejecuta npm run verify.</main>'):session&&!game?waiting('Conectando a la sala…','Recuperando tu partida.'):!game?landing():game.phase==='preparation'?preparation():game.phase==='combat'?combat():result();if(preserve){const nextPane=root.querySelector('.phase-catalog');if(nextPane)nextPane.scrollTop=scrollTop;window.scrollTo(0,pageTop);}renderedPhaseKey=phaseKey;root.setAttribute('aria-busy',String(busy));if(busy)root.querySelectorAll('button').forEach(b=>b.disabled=true);}
+function persist(){if(!session&&game)try{saveGame(game);}catch{networkWarning='No se pudo guardar en este navegador.';}}
+function setView(view){if(game?.combat?.round!==view.state.combat?.round){selected=null;decisions={};}game=view.state;joined=view.joined;lastRevision=game.revision;render();}
+async function api(path,body){
+ const response=await fetch(path,{method:body?'POST':'GET',headers:{...(body?{'Content-Type':'application/json'}:{}),...(session?{Authorization:'Bearer '+session.token}:{})},body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(10000)});
+ let data;try{data=await response.json();}catch{throw Error('El servidor de salas no está activo. Ejecuta npm run dev para usar online.');}
+ if(!response.ok){const e=Error(data.error??'No se pudo conectar.');e.code=data.code;throw e;}return data;
 }
-function choice(kind, entries, selected, type, detail = '') {
-  return `<div class="choices">${entries.map(entry => `<button type="button" class="choice ${selected(entry) ? 'chosen' : ''}" data-action="choice" data-type="${type}" data-id="${h(entry.id)}" ${detail ? `data-slot="${detail}"` : ''} aria-pressed="${selected(entry)}"><span class="choice-title">${h(entry.name)}</span><small>${h(entry.description)}</small><span class="choice-stats">${Object.entries(entry.stats ?? {}).map(([key, value]) => `${value > 0 ? '+' : ''}${value} ${label[key]}`).join(' · ') || (kind === 'talents' ? 'Efecto pasivo' : '')}</span></button>`).join('')}</div>`;
+let lastPollAt=0,pollInFlight=false;
+async function poll(){if(!session||busy||pollInFlight||document.hidden||game?.phase==='result')return;const delay=game?.phase==='preparation'&&joined?10000:2500;if(Date.now()-lastPollAt<delay)return;lastPollAt=Date.now();pollInFlight=true;try{const view=await api('/api/state?room='+session.code);if(view.state.revision!==lastRevision||!game){networkWarning='';setView(view);}else if(networkWarning){networkWarning='';render();}}catch(e){networkWarning=e.message;render();}finally{pollInFlight=false;}}
+async function command(action,arg){
+ if(session){
+  const request={command:action,arg,revision:game.revision,round:game.combat?.round,requestId:globalThis.crypto?.randomUUID?.()??`${Date.now()}-${Math.random().toString(36).slice(2)}`};
+  try{setView(await api('/api/command?room='+session.code,request));}catch(e){if(e.code!=='STALE_STATE')throw e;const view=await api('/api/state?room='+session.code);setView(view);request.revision=game.revision;setView(await api('/api/command?room='+session.code,request));}
+ }else{
+  const i=index();
+  if(action==='choose')game=choosePhase(game,i,arg);
+  else if(action==='draw')game=drawPhase(game,i);
+  else if(action==='advance')game=advancePhase(game,i);
+  else if(action==='configure'){game=structuredClone(game);game.players[i].build=changeBuild(game.players[i].build,{type:'talent-config',...arg});game.revision++;}
+  else if(action==='ready'){game.preparation.hasRolled[i]=true;game=confirmPlayer(game);}
+  else if(action==='continue-prep')game=continuePreparation(game);
+  else if(action==='continue-combat')game=continueCombat(game);
+  else if(action==='action')game=submitAction(game,arg);
+  else if(action==='rematch')game=initializePreparation(rematch(game));
+  else if(action==='restart'){game=structuredClone(game);game.players[i].build=createBuild();game.preparation.steps[i]=0;game.preparation.offers[i]=null;game.preparation.selected[i]=false;game.preparation.completed[i]=[];game.revision++;}
+  persist();render();
+ }
 }
-function equipmentPane(build) {
-  return RULES.slots.map(slot => `<section class="equip-group"><h3>${slotName[slot]}</h3><div class="choices compact"><button type="button" class="choice ${build.equipment[slot] === null ? 'chosen' : ''}" data-action="choice" data-type="equip" data-slot="${slot}" data-id="" aria-pressed="${build.equipment[slot] === null}"><span class="choice-title">Sin equipar</span></button>${options('items', item => item.slot === slot).map(item => `<button type="button" class="choice ${build.equipment[slot] === item.id ? 'chosen' : ''}" data-action="choice" data-type="equip" data-slot="${slot}" data-id="${item.id}" aria-pressed="${build.equipment[slot] === item.id}"><span class="choice-title">${h(item.name)}</span><small>${h(item.description)}</small><span class="choice-stats">${Object.entries(item.stats).map(([key, value]) => `${value > 0 ? '+' : ''}${value} ${label[key]}`).join(' · ')}</span></button>`).join('')}</div></section>`).join('');
-}
-const lookOptions = {
-  skin: [['warm', 'Cálida'], ['light', 'Clara'], ['deep', 'Oscura']],
-  hair: [['dark', 'Oscuro'], ['silver', 'Plateado'], ['flame', 'Cobrizo']],
-  style: [['short', 'Corto'], ['long', 'Largo']],
-  cape: [['none', 'Sin capa'], ['red', 'Carmesí'], ['blue', 'Azul']]
-};
-function appearancePane(build) {
-  return `<p class="panel-intro">Cada cambio se dibuja sobre el personaje al instante.</p>${Object.entries(lookOptions).map(([key, entries]) => `<section class="look-group"><h3>${{ skin: 'Piel', hair: 'Cabello', style: 'Peinado', cape: 'Capa' }[key]}</h3><div class="chips">${entries.map(([value, name]) => `<button type="button" class="chip ${build.appearance[key] === value ? 'chosen' : ''}" data-action="appearance" data-key="${key}" data-value="${value}" aria-pressed="${build.appearance[key] === value}">${name}</button>`).join('')}</div></section>`).join('')}`;
-}
-function selectionPane(build) {
-  if (tab === 'origin') return `<p class="panel-intro">Elige tu linaje, oficio y don. Las cifras se recalculan al instante.</p><h3>Linaje</h3>${choice('races', content.races, e => e.id === build.raceId, 'race')}<h3>Oficio</h3>${choice('classes', content.classes, e => e.id === build.classId, 'class')}<h3>Don</h3>${choice('gifts', content.gifts, e => e.id === build.giftId, 'gift')}`;
-  if (tab === 'talents') return `<p class="panel-intro">Elige hasta dos talentos. Pulsa uno otra vez para retirarlo.</p>${choice('talents', content.talents, e => build.talentIds.includes(e.id), 'talent')}`;
-  if (tab === 'equipment') return `<p class="panel-intro">El equipo modifica las estadísticas y las capas del personaje.</p>${equipmentPane(build)}`;
-  return appearancePane(build);
-}
-
-function shell(step, body) {
-  return `<div class="app-shell"><header class="topbar"><div class="brand"><span class="brand-symbol">✧</span><span>CARNALIA</span><small>ARENA DE DUELOS</small></div><div class="top-right"><span class="edition">BASE · v0.1</span>${game ? `<button class="quiet-link" data-action="abandon">Abandonar partida</button>` : ''}</div></header>${step ? `<div class="phase-line"><span class="${step === 1 ? 'active' : ''}">01 / PREPARAR</span><span class="${step === 2 ? 'active' : ''}">02 / COMBATIR</span><span class="${step === 3 ? 'active' : ''}">03 / RESULTADO</span></div>` : ''}${error ? `<div class="alert" role="alert">${h(error)}</div>` : ''}${warning ? `<div class="notice" role="status">${h(warning)}</div>` : ''}${body}<footer class="footer">CARNALIA <span>◇</span> DOS VOLUNTADES · UNA ARENA <span>◇</span> DUELO LOCAL</footer></div>`;
-}
-function landing() {
-  return shell(0, `<main class="landing"><div class="landing-copy"><span class="eyebrow">EL UMBRAL ESTÁ ABIERTO</span><h1>Forja tu<br><em>destino.</em></h1><p>Dos combatientes. Builds únicas. Decisiones ocultas. Entra en la arena y demuestra quién construyó la leyenda más fuerte.</p><div class="feature-line"><span>✦ PREPARA</span><span>◆ DECIDE</span><span>⚔ COMBATE</span></div></div><form id="new-game" class="start-card"><span class="card-kicker">NUEVO DUELO / 001</span><h2>Entra en Carnalia</h2><p>Comparte este dispositivo: cada jugador preparará su héroe y elegirá sus acciones por separado.</p><label>PRIMER COMBATIENTE<input name="player1" minlength="2" maxlength="18" placeholder="Nombre del jugador 1" required autocomplete="off"></label><label>SEGUNDO COMBATIENTE<input name="player2" minlength="2" maxlength="18" placeholder="Nombre del jugador 2" required autocomplete="off"></label><fieldset><legend>MODO DE PREPARACIÓN</legend><label class="mode-choice"><input type="radio" name="mode" value="selection" checked><span><b>Selección</b><small>Diseña cada detalle de tu build.</small></span></label><label class="mode-choice"><input type="radio" name="mode" value="chance"><span><b>Azar</b><small>Hasta tres tiradas para tentar tu destino.</small></span></label></fieldset><button type="submit" class="primary full">CREAR PARTIDA <span>↗</span></button><span class="helper">La partida se guarda en este navegador.</span></form></main>`);
-}
-function handoff(kind, name) {
-  return shell(kind === 'prep' ? 1 : 2, `<main class="handoff"><div class="seal">✧</div><span class="eyebrow">TURNO RESERVADO</span><h1>Entrega la arena<br>a <em>${h(name)}</em></h1><p>Deja que el siguiente jugador tome el dispositivo antes de continuar.</p><button class="primary" data-action="continue-${kind}">SOY ${h(name).toUpperCase()} · CONTINUAR →</button></main>`);
-}
-function preparation() {
-  const { preparation: prep, mode } = game;
-  if (prep.handoff) return handoff('prep', game.players[1].name);
-  const index = prep.index;
-  const player = game.players[index];
-  const build = player.build;
-  const chance = mode === 'chance';
-  const canConfirm = !chance || prep.hasRolled[index];
-  const tabs = [['origin', 'Origen'], ['talents', 'Talentos'], ['equipment', 'Equipo'], ['appearance', 'Apariencia']];
-  const editor = chance ? `<div class="editor-head"><span class="eyebrow">EL DESTINO DECIDE</span><h2>La tirada de ${h(player.name)}</h2><p>La raza, clase, talentos y equipo son aleatorios. Puedes cambiar la apariencia.</p></div><div class="roll-area"><button class="primary" data-action="roll" ${prep.rollsRemaining[index] === 0 ? 'disabled' : ''}>✦ ${prep.hasRolled[index] ? 'VOLVER A TIRAR' : 'TIRAR BUILD'} <span>(${prep.rollsRemaining[index]} restantes)</span></button><small>Confirmar conserva el resultado actual.</small></div>${prep.hasRolled[index] ? buildInventory(build) : '<div class="empty-roll">✧<br>Tu destino aún no ha sido revelado.</div>'}<div class="divider"></div><h3>PERSONALIZACIÓN</h3>${appearancePane(build)}` : `<div class="editor-head"><span class="eyebrow">CONSTRUYE TU LEYENDA</span><h2>Elige tu camino</h2><p>Cada elección transforma tus estadísticas y tu silueta.</p></div><div class="tabs" role="tablist" aria-label="Opciones de preparación">${tabs.map(([key, title]) => `<button type="button" role="tab" aria-selected="${tab === key}" class="${tab === key ? 'active' : ''}" data-action="tab" data-tab="${key}">${title}</button>`).join('')}</div><div class="tab-content" role="tabpanel">${selectionPane(build)}</div>`;
-  return shell(1, `<main class="preparation"><div class="section-heading"><div><span class="eyebrow">PREPARACIÓN · ${chance ? 'AZAR' : 'SELECCIÓN'}</span><h1>${h(player.name)}, <em>forja tu héroe.</em></h1></div><span class="counter">JUGADOR ${index + 1} / 2</span></div><div class="prep-grid"><aside class="character-panel"><div class="visual-scene">${avatar(index)}<span class="scene-caption">VISTA DEL COMBATIENTE</span></div><div class="character-details"><span class="eyebrow">${h(chosenName('races', build.raceId))} / ${h(chosenName('classes', build.classId))}</span><h2>${h(player.name)}</h2>${statGrid(build)}<div class="selected-gear"><span>ARMA EQUIPADA</span><b>${h(chosenName('items', build.equipment.weapon))}</b></div></div></aside><section class="editor-panel">${editor}<div class="editor-footer"><span>${chance ? 'Lo que salga, se lleva a la arena.' : `${build.talentIds.length} / ${RULES.maxTalents} talentos elegidos`}</span><button class="primary" data-action="confirm-build" ${canConfirm ? '' : 'disabled'}>CONFIRMAR BUILD →</button></div></section></div></main>`);
-}
-function fighterCard(index) {
-  const player = game.players[index];
-  const fighter = game.combat.fighters[index];
-  const max = calculateStats(player.build);
-  const hpPercent = Math.max(0, fighter.hp / max.hp * 100);
-  const enPercent = Math.max(0, fighter.energy / max.energy * 100);
-  return `<div class="fighter-card"><div class="fighter-name"><span>JUGADOR ${index + 1}</span><strong>${h(player.name)}</strong></div><div class="meter-label"><span>VIDA</span><b>${fighter.hp} / ${max.hp}</b></div><div class="meter"><i style="width:${hpPercent}%"></i></div><div class="meter-label"><span>ENERGÍA</span><b>${fighter.energy} / ${max.energy}</b></div><div class="meter energy"><i style="width:${enPercent}%"></i></div><div class="status-list">${fighter.statuses.length ? fighter.statuses.map(s => `<span title="${h(get('statuses', s.id).description)}">${h(get('statuses', s.id).name)} · ${s.duration}</span>`).join('') : '<span class="neutral">Sin estados</span>'}</div></div>`;
-}
-function combatView() {
-  const combat = game.combat;
-  if (combat.handoff) return handoff('combat', game.players[1].name);
-  const index = combat.selectionIndex;
-  const player = game.players[index];
-  const fighter = combat.fighters[index];
-  const abilities = availableAbilities(player.build).map(id => get('abilities', id));
-  const chosen = abilities.find(a => a.id === selectedAbility);
-  return shell(2, `<main class="combat"><div class="section-heading"><div><span class="eyebrow">LA ARENA / RONDA ${String(combat.round).padStart(2, '0')}</span><h1>El duelo <em>comienza.</em></h1></div><span class="counter">DECIDE ${h(player.name).toUpperCase()}</span></div><div class="arena"><div class="arena-sky"><span class="arena-moon"></span><span class="tower tower-a"></span><span class="tower tower-b"></span><span class="tower tower-c"></span></div><div class="arena-fighters"><div class="combatant">${avatar(0, 'fighter-sprite')}<span>${h(game.players[0].name)}</span></div><div class="arena-center">✧<small>VS</small></div><div class="combatant">${avatar(1, 'fighter-sprite')}<span>${h(game.players[1].name)}</span></div></div><div class="arena-floor"></div></div><div class="fighter-grid">${fighterCard(0)}${fighterCard(1)}</div><div class="combat-bottom"><section class="action-panel"><span class="eyebrow">ACCIÓN EN SECRETO</span><h2>${h(player.name)}, elige tu movimiento</h2><div class="abilities">${abilities.map(a => `<button class="ability ${selectedAbility === a.id ? 'chosen' : ''}" data-action="ability" data-id="${a.id}" ${fighter.energy < a.cost ? 'disabled' : ''} aria-pressed="${selectedAbility === a.id}"><span><b>${h(a.name)}</b><em>${a.cost ? `${a.cost} ✦` : 'GRATIS'}</em></span><small>${h(a.description)}</small></button>`).join('')}</div><div class="action-footer"><span>${chosen ? h(chosen.description) : 'Tu elección se ocultará al rival hasta resolver la ronda.'}</span><button class="primary" data-action="confirm-action" ${chosen ? '' : 'disabled'}>CONFIRMAR ACCIÓN →</button></div></section><aside class="battle-log"><span class="eyebrow">CRÓNICA DE COMBATE</span><h3>Última ronda</h3>${combat.lastEvents.length ? `<ol>${combat.lastEvents.map(line => `<li>${h(line)}</li>`).join('')}</ol>` : '<p>La arena espera el primer movimiento.</p>'}</aside></div></main>`);
-}
-function resultView() {
-  const winner = game.players.find(p => p.id === game.result.winnerId);
-  return shell(3, `<main class="result"><span class="eyebrow">DUELO COMPLETADO · ${game.result.rounds} RONDAS</span><div class="result-emblem">✧</div><h1>${winner ? `<em>${h(winner.name)}</em><br>conquista la arena.` : 'La arena dicta<br><em>un empate.</em>'}</h1><p>Dos builds se enfrentaron. Una historia queda escrita.</p><div class="result-fighters">${game.players.map((player, index) => `<div class="result-fighter ${winner?.id === player.id ? 'victor' : ''}">${avatar(index)}<b>${h(player.name)}</b><span>${winner?.id === player.id ? 'VICTORIA' : (winner ? 'DERROTA' : 'EMPATE')}</span></div>`).join('')}</div><div class="result-actions"><button class="primary" data-action="rematch">JUGAR OTRA VEZ →</button><button class="secondary" data-action="new-game">NUEVOS JUGADORES</button></div><details class="chronicle"><summary>Ver crónica del duelo (${game.combat.history.length} rondas)</summary>${game.combat.history.map(round => `<div><b>RONDA ${round.round}</b><p>${round.events.map(h).join('<br>')}</p></div>`).join('')}</details></main>`);
-}
-
-function render() {
-  if (validationErrors.length) root.innerHTML = shell(0, '<main class="fatal"><h1>No se pudo iniciar Carnalia.</h1><p>Corrige los errores de contenido antes de jugar.</p></main>');
-  else root.innerHTML = !game ? landing() : game.phase === 'preparation' ? preparation() : game.phase === 'combat' ? combatView() : resultView();
-  for (const canvas of root.querySelectorAll('[data-sprite-player]')) {
-    const index = Number(canvas.dataset.spritePlayer);
-    composeSprite(canvas, game.players[index].build, index ? 'left' : 'right');
-  }
-  if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
-    const debug = document.createElement('details');
-    debug.className = 'debug-drawer'; debug.open = debugOpen;
-    debug.innerHTML = `<summary>Estado de desarrollo</summary><pre>${h(JSON.stringify(game, null, 2))}</pre>`;
-    debug.addEventListener('toggle', () => { debugOpen = debug.open; });
-    root.querySelector('.app-shell')?.append(debug);
-  }
-}
-function transition(fn) {
-  try {
-    const newGame = fn();
-    if (newGame !== undefined) {
-      game = newGame;
-      try { saveGame(game); warning = ''; }
-      catch (e) { console.warn('Carnalia save unavailable:', e); warning = 'El navegador no pudo guardar esta partida. Puedes seguir jugando, pero se perderá al recargar.'; }
-    }
-    error = null;
-    render();
-  } catch (e) {
-    if (e.name === 'GameError') error = e.message;
-    else { console.error(e); error = 'Algo salió mal. Vuelve a intentar la acción.'; }
-    render();
-  }
-}
-
-root.addEventListener('submit', event => {
-  if (event.target.id !== 'new-game') return;
-  event.preventDefault();
-  const form = new FormData(event.target);
-  transition(() => createGame([form.get('player1'), form.get('player2')], form.get('mode')));
+async function perform(fn){if(busy)return;busy=true;error=null;render();try{await fn();}catch(e){error=e.message||'No se pudo completar la acción.';}finally{busy=false;render();}}
+root.addEventListener('submit',event=>{
+ event.preventDefault();const form=new FormData(event.target);
+ if(event.target.id==='new-game')perform(async()=>{
+  const mode=form.get('mode');
+  if(event.submitter?.value==='online'){const data=await api('/api/create',{name:form.get('player1'),mode});session={code:data.code,token:data.token,index:data.index};sessionStorage.setItem('carnalia-room',JSON.stringify(session));setView(data.view);}
+  else{game=initializePreparation(createGame([form.get('player1'),form.get('player2')],mode));persist();}
+ });
+ else if(event.target.id==='join-game')perform(async()=>{const data=await api('/api/join',{name:form.get('name'),code:form.get('code')});session={code:data.code,token:data.token,index:data.index};sessionStorage.setItem('carnalia-room',JSON.stringify(session));setView(data.view);});
 });
-root.addEventListener('click', event => {
-  const button = event.target.closest('[data-action]');
-  if (!button || button.disabled) return;
-  const { action } = button.dataset;
-  if (action === 'abandon') {
-    if (window.confirm('¿Abandonar esta partida y borrar su progreso?')) { clearGame(); game = null; selectedAbility = null; warning = ''; error = null; render(); }
-    return;
-  }
-  if (action === 'new-game') { clearGame(); game = null; selectedAbility = null; error = null; render(); return; }
-  if (action === 'tab') { tab = button.dataset.tab; render(); return; }
-  if (action === 'ability') { selectedAbility = button.dataset.id; render(); return; }
-  if (action === 'choice') {
-    const { type, id, slot } = button.dataset;
-    transition(() => updatePlayerBuild(game, type === 'equip' ? { type, slot, id: id || null } : { type, id }));
-  } else if (action === 'appearance') transition(() => updatePlayerBuild(game, { type: 'appearance', key: button.dataset.key, value: button.dataset.value }));
-  else if (action === 'roll') transition(() => rollPlayerBuild(game));
-  else if (action === 'confirm-build') transition(() => { tab = 'origin'; return confirmPlayer(game); });
-  else if (action === 'continue-prep') transition(() => continuePreparation(game));
-  else if (action === 'continue-combat') transition(() => continueCombat(game));
-  else if (action === 'confirm-action') transition(() => {
-    const next = submitAction(game, selectedAbility);
-    selectedAbility = null;
-    return next;
-  });
-  else if (action === 'rematch') transition(() => rematch(game));
+root.addEventListener('click',event=>{
+ const b=event.target.closest('[data-action]');if(!b||b.disabled||busy)return;
+ const action=b.dataset.action;
+ if(action==='ability'){selected=b.dataset.id;decisions={};render();return;}
+ if(action==='leave'){if(!window.confirm('¿Salir de esta partida?'))return;session=null;sessionStorage.removeItem('carnalia-room');game=null;clearGame();error=null;networkWarning='';selected=null;render();return;}
+ perform(async()=>{
+  if(action==='draw'){networkWarning='La ruleta está girando…';render();await new Promise(resolve=>setTimeout(resolve,450));networkWarning='';}
+  await command(action,action==='choose'?b.dataset.id:action==='action'?{abilityId:selected,choices:{...decisions}}:undefined);
+  if(action==='action'){selected=null;decisions={};}
+ });
 });
 
-render();
+function talentConfiguration(b){const config=b.talentConfig??{};const owns=k=>b.talentIds.some(id=>get('talents',id).mechanic===k);const sel=(key,label,entries,value)=>`<label>${label}<select data-config="${key}">${entries.map(e=>`<option value="${h(e.id)}" ${e.id===value?'selected':''}>${h(e.name)}</option>`).join('')}</select></label>`;return `<div class="talent-config">${owns('oath')?sel('oath','Acción a la que renuncias',COMMON_ACTIONS.map(id=>get('abilities',id)),config.oath??'evade'):''}${owns('arsenal')?sel('secondaryWeapon','Segunda arma de prueba',content.items.filter(e=>e.slot==='weapon'),config.secondaryWeapon??'azure_sword'):''}${owns('secondPhase')?sel('secondClass','Clase de la segunda fase',content.classes,config.secondClass??'arcanist'):''}</div>`;}
+function combatDecisions(i){const c=game.combat,b=baseBuild(game.players,c,i),select=(key,label,entries)=>`<label>${label}<select data-decision="${key}"><option value="">Sin seleccionar</option>${entries.map(e=>`<option value="${h(e.id)}" ${decisions[key]===e.id?'selected':''}>${h(e.name)}</option>`).join('')}</select></label>`;let html='';if(selected&&get('abilities',selected)?.choice)html+=select('target','Objetivo de la técnica',choicesFor(game.players,c,i,selected));if(has(game.players,c,i,'oracle')||has(game.players,c,i,'pattern'))html+=select('prediction','Predicción secreta · acción rival',predictionOptions(game.players,c,i));if(has(game.players,c,i,'pattern'))html+=select('prediction2','Predicción secreta · siguiente ronda',predictionOptions(game.players,c,i));if(has(game.players,c,i,'mask')&&!c.fighters[i].uses.mask)html+=select('mask','Anuncio de Máscara para la siguiente ronda',COMMON_ACTIONS.map(id=>get('abilities',id)));if(has(game.players,c,i,'arsenal'))html+=select('weapon','Arma activa esta ronda',[...new Set([game.players[i].build.equipment.weapon,b.talentConfig?.secondaryWeapon??'azure_sword'])].map(id=>get('items',id)));return html?`<div class="combat-decisions">${html}</div>`:'';}
+root.addEventListener('change',event=>{const el=event.target;if(el.id==='talent-tier'){talentTier=el.value;render();}else if(el.id==='talent-search'){talentSearch=el.value;render();}else if(el.dataset?.decision){if(el.value)decisions[el.dataset.decision]=el.value;else delete decisions[el.dataset.decision];render();}else if(el.dataset?.config)perform(()=>command('configure',{key:el.dataset.config,id:el.value}));});
+root.addEventListener('keydown',event=>{if(event.target.id==='talent-search'&&event.key==='Enter'){event.preventDefault();talentSearch=event.target.value;render();}});
+
+render();if(session)poll();setInterval(poll,2500);
